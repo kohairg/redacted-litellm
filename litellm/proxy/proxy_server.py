@@ -1107,7 +1107,7 @@ async def async_data_generator(response, user_api_key_dict):
                         else:
                             if re.match(r'\w+', token):
                                 stripped_token = re.sub(r'\W', '', token)
-                                if len(stripped_token) >= 7:
+                                if len(stripped_token) >= 8:
                                     # Redact the word
                                     redacted_token = ''.join(['█' if c.isalnum() else c for c in token])
                                     redacted_tokens.append(redacted_token)
@@ -1139,7 +1139,7 @@ async def async_data_generator(response, user_api_key_dict):
             def redact_remaining(text):
                 if re.match(r'\w+', text):
                     stripped_token = re.sub(r'\W', '', text)
-                    if len(stripped_token) >= 7:
+                    if len(stripped_token) >= 8:
                         # Redact the word
                         return ''.join(['█' if c.isalnum() else c for c in text])
                 return text
