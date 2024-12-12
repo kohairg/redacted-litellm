@@ -1068,12 +1068,82 @@ async def async_data_generator(response, user_api_key_dict):
     verbose_proxy_logger.debug("inside generator")
     try:
         start_time = time.time()
+        prev_chunk_text = ""
         async for chunk in response:
             verbose_proxy_logger.debug(f"returned chunk: {chunk}")
             try:
-                yield f"data: {json.dumps(chunk.dict())}\n\n"
+                # Extract text from the chunk
+                if hasattr(chunk, 'dict'):
+                    chunk_dict = chunk.dict()
+                    # Determine the key containing the text
+                    if 'content' in chunk_dict.get('choices', [{}])[0].get('delta', {}):
+                        curr_chunk_text = chunk_dict['choices'][0]['delta']['content']
+                    elif 'text' in chunk_dict.get('choices', [{}])[0]:
+                        curr_chunk_text = chunk_dict['choices'][0]['text']
+                    else:
+                        # If no recognizable text, pass the chunk through
+                        yield f"data: {json.dumps(chunk_dict)}\n\n"
+                        continue
+                else:
+                    # If the chunk isn't a dict, pass it through
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    continue
+
+                # Combine with previous buffer
+                combined_text = prev_chunk_text + curr_chunk_text
+                words = combined_text.split()
+
+                if len(words) < 2:
+                    # Not enough words to process; keep buffering
+                    prev_chunk_text = combined_text
+                    continue
+
+                # Process all but the last word
+                processed_words = []
+                for word in words[:-1]:
+                    stripped_word = word.strip('.,!?:;')
+                    if len(stripped_word) >= 7:
+                        # Preserve punctuation
+                        punctuation = word[len(stripped_word):]
+                        processed_words.append('█' * len(stripped_word) + punctuation)
+                    else:
+                        processed_words.append(word)
+
+                # Reconstruct the processed text
+                output_text = ' '.join(processed_words) + ' '
+
+                # Update the chunk with redacted text
+                if 'content' in chunk_dict['choices'][0]['delta']:
+                    chunk_dict['choices'][0]['delta']['content'] = output_text
+                else:
+                    chunk_dict['choices'][0]['text'] = output_text
+
+                # Update the buffer with the last word
+                prev_chunk_text = words[-1]
+
+                # Yield the modified chunk
+                yield f"data: {json.dumps(chunk_dict)}\n\n"
             except Exception as e:
                 yield f"data: {str(e)}\n\n"
+
+        # After streaming, process any remaining text in the buffer
+        if prev_chunk_text:
+            stripped_word = prev_chunk_text.strip('.,!?:;')
+            if len(stripped_word) >= 7:
+                punctuation = prev_chunk_text[len(stripped_word):]
+                final_text = '█' * len(stripped_word) + punctuation
+            else:
+                final_text = prev_chunk_text
+
+            final_chunk = {
+                "choices": [{
+                    "delta": {"content": final_text},
+                    "index": 0,
+                    "finish_reason": None
+                }],
+                "object": "chat.completion.chunk"
+            }
+            yield f"data: {json.dumps(final_chunk)}\n\n"
 
         ### ALERTING ###
         end_time = time.time()
