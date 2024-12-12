@@ -1068,14 +1068,14 @@ async def async_data_generator(response, user_api_key_dict):
     verbose_proxy_logger.debug("inside generator")
     try:
         start_time = time.time()
-        prev_chunk_text = ""
+        buffer = ""
+
         async for chunk in response:
             verbose_proxy_logger.debug(f"returned chunk: {chunk}")
             try:
                 # Extract text from the chunk
                 if hasattr(chunk, 'dict'):
                     chunk_dict = chunk.dict()
-                    # Determine the key containing the text
                     if 'content' in chunk_dict.get('choices', [{}])[0].get('delta', {}):
                         curr_chunk_text = chunk_dict['choices'][0]['delta']['content']
                     elif 'text' in chunk_dict.get('choices', [{}])[0]:
@@ -1090,54 +1090,64 @@ async def async_data_generator(response, user_api_key_dict):
                     continue
 
                 # Combine with previous buffer
-                combined_text = prev_chunk_text + curr_chunk_text
-                words = combined_text.split()
+                combined_text = buffer + curr_chunk_text
 
-                if len(words) < 2:
-                    # Not enough words to process; keep buffering
-                    prev_chunk_text = combined_text
-                    continue
+                # Process the combined text and update the buffer
+                def process_chunk(text, buffer):
+                    text_to_process = buffer + text
+                    tokens = re.findall(r'\w+|\W+', text_to_process, flags=re.UNICODE)
+                    redacted_tokens = []
+                    new_buffer = ""
 
-                # Process all but the last word
-                processed_words = []
-                for word in words[:-1]:
-                    stripped_word = word.strip('.,!?:;')
-                    if len(stripped_word) >= 7:
-                        # Preserve punctuation
-                        punctuation = word[len(stripped_word):]
-                        processed_words.append('█' * len(stripped_word) + punctuation)
-                    else:
-                        processed_words.append(word)
+                    for i, token in enumerate(tokens):
+                        if i == len(tokens) - 1 and re.match(r'\w', token):
+                            # Last token is a word, may be incomplete, buffer it
+                            new_buffer = token
+                            break
+                        else:
+                            if re.match(r'\w+', token):
+                                stripped_token = re.sub(r'\W', '', token)
+                                if len(stripped_token) >= 7:
+                                    # Redact the word
+                                    redacted_token = ''.join(['█' if c.isalnum() else c for c in token])
+                                    redacted_tokens.append(redacted_token)
+                                else:
+                                    redacted_tokens.append(token)
+                            else:
+                                # Non-word characters, preserve as is
+                                redacted_tokens.append(token)
+                    return ''.join(redacted_tokens), new_buffer
 
-                # Reconstruct the processed text
-                output_text = ' '.join(processed_words) + ' '
+                # Redact the combined text
+                redacted_text, buffer = process_chunk(curr_chunk_text, buffer)
 
                 # Update the chunk with redacted text
                 if 'content' in chunk_dict['choices'][0]['delta']:
-                    chunk_dict['choices'][0]['delta']['content'] = output_text
+                    chunk_dict['choices'][0]['delta']['content'] = redacted_text
                 else:
-                    chunk_dict['choices'][0]['text'] = output_text
-
-                # Update the buffer with the last word
-                prev_chunk_text = words[-1]
+                    chunk_dict['choices'][0]['text'] = redacted_text
 
                 # Yield the modified chunk
                 yield f"data: {json.dumps(chunk_dict)}\n\n"
+
             except Exception as e:
                 yield f"data: {str(e)}\n\n"
 
         # After streaming, process any remaining text in the buffer
-        if prev_chunk_text:
-            stripped_word = prev_chunk_text.strip('.,!?:;')
-            if len(stripped_word) >= 7:
-                punctuation = prev_chunk_text[len(stripped_word):]
-                final_text = '█' * len(stripped_word) + punctuation
-            else:
-                final_text = prev_chunk_text
+        if buffer:
+            # Redact any remaining text in the buffer
+            def redact_remaining(text):
+                if re.match(r'\w+', text):
+                    stripped_token = re.sub(r'\W', '', text)
+                    if len(stripped_token) >= 7:
+                        # Redact the word
+                        return ''.join(['█' if c.isalnum() else c for c in text])
+                return text
 
+            redacted_final = redact_remaining(buffer)
             final_chunk = {
                 "choices": [{
-                    "delta": {"content": final_text},
+                    "delta": {"content": redacted_final},
                     "index": 0,
                     "finish_reason": None
                 }],
@@ -2544,6 +2554,7 @@ async def health_readiness():
     else:
         return {"status": "healthy", "db": "Not connected"}
     raise HTTPException(status_code=503, detail="Service Unhealthy")
+
 
 
 @router.get("/health/liveliness", tags=["health"])
