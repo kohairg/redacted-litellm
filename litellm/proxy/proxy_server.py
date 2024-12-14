@@ -1127,6 +1127,13 @@ async def async_data_generator(response, user_api_key_dict):
                 else:
                     chunk_dict['choices'][0]['text'] = redacted_text
 
+                # Remove unnecessary fields
+                keys_to_remove = ['function_call', 'refusal', 'tool_calls', 'usage']
+                for key in keys_to_remove:
+                    chunk_dict.pop(key, None)
+                    chunk_dict['choices'][0].pop(key, None)
+                    chunk_dict['choices'][0]['delta'].pop(key, None)
+
                 # Yield the modified chunk
                 yield f"data: {json.dumps(chunk_dict)}\n\n"
 
