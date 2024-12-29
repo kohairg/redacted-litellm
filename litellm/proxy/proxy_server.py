@@ -4,6 +4,7 @@ import copy
 import inspect
 import io
 import os
+import re
 import random
 import secrets
 import subprocess
@@ -2596,22 +2597,16 @@ async def async_assistants_data_generator(
         error_returned = json.dumps({"error": proxy_exception.to_dict()})
         yield f"data: {error_returned}\n\n"
 
-import re
 
 async def async_data_generator(
     response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
 ):
-    import random
 
     def get_redaction_probability(word_length: int) -> float:
         """
         Returns the probability of redaction based on the length of the word:
         """
-        if word_length == 1:
-            return 0.01
-        if word_length == 2:
-            return 0.02
-        elif word_length == 3:
+        if word_length == 3:
             return 0.05
         elif word_length == 4:
             return 0.10
@@ -2621,16 +2616,13 @@ async def async_data_generator(
             return 0.30
         elif word_length == 7:
             return 0.40
-        elif word_length >= 8:  # 8 or more
+        elif word_length >= 8:
             return 0.75
         else:
             return 0.00
 
-    def redact_match(m: re.Match) -> str:
-        """Helper to decide if we should redact based on probability."""
-        content = m.group()
+    def redact_probability(content: str) -> str:
         p = get_redaction_probability(len(content))
-        # Only redact if random draw is below the probability
         if random.random() < p:
             return "█" * len(content)
         else:
@@ -2643,8 +2635,10 @@ async def async_data_generator(
     try:
         async for chunk in response:
             verbose_proxy_logger.debug(
-                f"async_data_generator: received streaming chunk - {chunk}"
+                "async_data_generator: received streaming chunk - {}".format(chunk)
             )
+
+            # Let any plugin/hook modify or block the chunk before we process
             chunk = await proxy_logging_obj.async_post_call_streaming_hook(
                 user_api_key_dict=user_api_key_dict,
                 response=chunk,
@@ -2655,39 +2649,73 @@ async def async_data_generator(
 
             chunk_obj = json.loads(chunk)
 
+            # Store the chunk into leftover_object if needed
             if leftover_object is None:
                 leftover_object = chunk_obj
 
-            # Pull out new content
+            # Extract new content
             delta_content = chunk_obj["choices"][0]["delta"].get("content")
             if delta_content:
                 leftover_buffer += delta_content
 
-            # Once we see a non-alphanumeric boundary, we attempt partial redaction
-            if leftover_buffer and not leftover_buffer[-1].isalnum():
-                # Redact any contiguous alphanumeric strings of length >= 4
-                leftover_buffer = re.sub(
-                    r"[a-zA-Z0-9]{4,}",
-                    redact_match,
-                    leftover_buffer,
-                )
+            # ------------------------------------------------------
+            # UPDATED LOGIC:
+            # Scan through leftover_buffer. Whenever we hit whitespace
+            # or any non-alphanumeric boundary, we treat everything
+            # before that boundary as a chunk to redact and yield.
+            # ------------------------------------------------------
+            redacted_output = []
+            current_run = []
+            i = 0
 
-                leftover_object["choices"][0]["delta"]["content"] = leftover_buffer
-                yield f"data: {json.dumps(leftover_object)}\n\n"
+            while i < len(leftover_buffer):
+                ch = leftover_buffer[i]
+                # If it's alphanumeric, accumulate and keep going
+                if ch.isalnum():
+                    current_run.append(ch)
+                else:
+                    # We hit a non-alphanumeric boundary, so:
+                    # 1) Redact the current alphanumeric run
+                    run_str = "".join(current_run)
+                    run_str = redact_probability(run_str)
+                    # 2) Add that redacted run + the boundary char to the final output
+                    redacted_output.append(run_str)
+                    redacted_output.append(ch)
+                    # reset current_run
+                    current_run = []
+                i += 1
 
-                # Reset buffer and leftover_object so next chunk starts fresh
+            # After the loop, if we ended on alphanumerics and have unyielded content:
+            if current_run:
+                # We haven't encountered a boundary yet, so don't yield until we see one
+                leftover_buffer = "".join(current_run)
+            else:
+                # If we ended on a boundary, leftover_buffer is blank now
                 leftover_buffer = ""
+
+            # If we collected anything in redacted_output, yield it now
+            piece_to_yield = "".join(redacted_output)
+            if piece_to_yield:
+                leftover_object["choices"][0]["delta"]["content"] = piece_to_yield
+                yield f"data: {json.dumps(leftover_object)}\n\n"
                 leftover_object = None
 
-        # Once we reach the end of streaming
+        # At the end of streaming, flush out any last chunk if it never hit
+        # a boundary (e.g. leftover_buffer ends with letters).
+        if leftover_buffer:
+            final_chunk = redact_probability(leftover_buffer)
+            leftover_object = leftover_object or {"choices": [{"delta": {}}]}
+            leftover_object["choices"][0]["delta"]["content"] = final_chunk
+            yield f"data: {json.dumps(leftover_object)}\n\n"
+
+        # Finally, yield [DONE]
         done_message = "[DONE]"
         yield f"data: {done_message}\n\n"
 
     except Exception as e:
         verbose_proxy_logger.exception(
-            "litellm.proxy.proxy_server.async_data_generator(): Exception occured - {}".format(
-                str(e)
-            )
+            "litellm.proxy.proxy_server.async_data_generator(): "
+            f"Exception occurred - {str(e)}"
         )
         await proxy_logging_obj.post_call_failure_hook(
             user_api_key_dict=user_api_key_dict,
@@ -2695,7 +2723,8 @@ async def async_data_generator(
             request_data=request_data,
         )
         verbose_proxy_logger.debug(
-            f"\033[1;31mAn error occurred: {e}\n\n Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`"
+            f"\033[1;31mAn error occurred: {e}\n\n"
+            "Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`"
         )
 
         if isinstance(e, HTTPException):
