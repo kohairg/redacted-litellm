@@ -2601,12 +2601,46 @@ import re
 async def async_data_generator(
     response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
 ):
+    import random
+
+    def get_redaction_probability(word_length: int) -> float:
+        """
+        Returns the probability of redaction based on the length of the word:
+        """
+        if word_length == 1:
+            return 0.01
+        if word_length == 2:
+            return 0.02
+        elif word_length == 3:
+            return 0.05
+        elif word_length == 4:
+            return 0.10
+        elif word_length == 5:
+            return 0.20
+        elif word_length == 6:
+            return 0.30
+        elif word_length == 7:
+            return 0.40
+        elif word_length >= 8:  # 8 or more
+            return 0.75
+        else:
+            return 0.00
+
+    def redact_match(m: re.Match) -> str:
+        """Helper to decide if we should redact based on probability."""
+        content = m.group()
+        p = get_redaction_probability(len(content))
+        # Only redact if random draw is below the probability
+        if random.random() < p:
+            return "█" * len(content)
+        else:
+            return content
+
     verbose_proxy_logger.debug("inside generator")
     leftover_buffer = ""
     leftover_object = None
 
     try:
-        time.time()
         async for chunk in response:
             verbose_proxy_logger.debug(
                 f"async_data_generator: received streaming chunk - {chunk}"
@@ -2629,12 +2663,12 @@ async def async_data_generator(
             if delta_content:
                 leftover_buffer += delta_content
 
-            # Look at the last character: if it's non-alphanumeric, do the redaction
+            # Once we see a non-alphanumeric boundary, we attempt partial redaction
             if leftover_buffer and not leftover_buffer[-1].isalnum():
-                # Redact any contiguous alphanumeric strings >= 8 in length
+                # Redact any contiguous alphanumeric strings of length >= 4
                 leftover_buffer = re.sub(
-                    r"[a-zA-Z0-9]{8,}",
-                    lambda m: "█" * len(m.group()),
+                    r"[a-zA-Z0-9]{4,}",
+                    redact_match,
                     leftover_buffer,
                 )
 
