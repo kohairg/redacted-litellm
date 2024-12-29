@@ -2596,11 +2596,14 @@ async def async_assistants_data_generator(
         error_returned = json.dumps({"error": proxy_exception.to_dict()})
         yield f"data: {error_returned}\n\n"
 
+import re
 
 async def async_data_generator(
     response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
 ):
     verbose_proxy_logger.debug("inside generator")
+    leftover_buffer = ""  # holds a trailing partial alphanumeric sequence from prior chunk
+    leftover_object = None
     try:
         time.time()
         async for chunk in response:
@@ -2615,10 +2618,64 @@ async def async_data_generator(
             if isinstance(chunk, BaseModel):
                 chunk = chunk.model_dump_json(exclude_none=True, exclude_unset=True)
 
-            try:
-                yield f"data: {chunk}\n\n"
-            except Exception as e:
-                yield f"data: {str(e)}\n\n"
+            # try:
+            """
+            MIDDLE OF STREAMING
+            {
+                "id": "chatcmpl-caaea19e9fc546d2a11924628fb73466",
+                "created": 1735442713,
+                "model": "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": ""
+                        }
+                    }
+                ]
+            }
+
+            END OF STREAMING
+            {
+                "id": "chatcmpl-caaea19e9fc546d2a11924628fb73466",
+                "created": 1735442713,
+                "model": "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "index": 0,
+                        "delta": {}
+                    }
+                ]
+            }
+            """
+            chunk_obj = json.loads(chunk)
+            if leftover_object is None:
+                leftover_object = chunk_obj
+            if chunk_obj["choices"][0]["delta"] is not None:
+                # if chunk choices delta contains content
+                if chunk_obj["choices"][0]["delta"].get("content", None) is not None:
+                    # append to leftover_buffer
+                    leftover_buffer += chunk_obj["choices"][0]["delta"]["content"]
+
+                # check if the leftover_buffer ends with a newline, whitespace, punctuation, special character, or tab
+                print(f"leftover_buffer: |{leftover_buffer}|")
+                if re.search(r"\n|\s|[.,!?]|[^\w\s]", leftover_buffer):
+                    print("leftover_buffer ends with a newline, whitespace, punctuation, special character, or tab")
+                    # if it does, then redact any alphanumeric chars that are greater than 8 chars long
+                    leftover_buffer = re.sub(r"[a-zA-Z0-9]{8,}", lambda m: '█' * len(m.group()), leftover_buffer)
+                    # yield the buffer and reset
+                    leftover_object["choices"][0]["delta"]["content"] = leftover_buffer
+                    yield f"data: {json.dumps(leftover_object)}\n\n"
+                    leftover_buffer = ""
+                    leftover_object = None
+                else:
+                    print("leftover_buffer does not end with a newline, whitespace, punctuation, special character, or tab")
+                    # if it doesn't then wait for the next chunk
+                    pass
+
 
         # Streaming is done, yield the [DONE] chunk
         done_message = "[DONE]"
